@@ -17,6 +17,7 @@
 
 #include <X11/Xft/Xft.h>
 #include <X11/Xlib-xcb.h>
+#include <X11/extensions/Xrender.h>
 
 // Here bet  dragons
 
@@ -41,6 +42,7 @@ typedef struct monitor_t {
     int x, y, width;
     xcb_window_t window;
     xcb_pixmap_t pixmap;
+    Picture pic;
     struct monitor_t *prev, *next;
 } monitor_t;
 
@@ -98,7 +100,8 @@ static xcb_gcontext_t gc[GC_MAX];
 static xcb_visualid_t visual;
 static Visual *visual_ptr;
 static xcb_colormap_t colormap;
-
+static XRenderPictFormat *pictformat;
+static Picture whitepic;
 
 static monitor_t *monhead, *montail;
 static font_t *font_list[MAX_FONT_COUNT];
@@ -127,18 +130,22 @@ static wchar_t xft_char[MAX_WIDTHS];
 static char    xft_width[MAX_WIDTHS];
 
 void
+alloc_fg_color (void)
+{
+    const XRenderColor color = { fgc.r * 0x101, fgc.g * 0x101, fgc.b * 0x101, fgc.a * 0x101 };
+    if (!XftColorAllocValue(dpy, visual_ptr, colormap, &color, &sel_fg)) {
+        fprintf(stderr, "Couldn't allocate xft font color '%hx'\n", fgc.v);
+    }
+}
+
+void
 update_gc (void)
 {
     xcb_change_gc(c, gc[GC_DRAW], XCB_GC_FOREGROUND, (const uint32_t []){ fgc.v });
     xcb_change_gc(c, gc[GC_CLEAR], XCB_GC_FOREGROUND, (const uint32_t []){ bgc.v });
     xcb_change_gc(c, gc[GC_ATTR], XCB_GC_FOREGROUND, (const uint32_t []){ ugc.v });
     XftColorFree(dpy, visual_ptr, colormap , &sel_fg);
-    char color[] = "#ffffff";
-    uint32_t nfgc = fgc.v & 0x00ffffff;
-    snprintf(color, sizeof(color), "#%06X", nfgc);
-    if (!XftColorAllocName (dpy, visual_ptr, colormap, color, &sel_fg)) {
-        fprintf(stderr, "Couldn't allocate xft font color '%s'\n", color);
-    }
+    alloc_fg_color();
 }
 
 void
@@ -284,6 +291,9 @@ draw_char (monitor_t *mon, font_t *cur_font, int x, int align, uint16_t ch)
 
     int y = bh / 2 + cur_font->height / 2- cur_font->descent + offsets_y[offset_y_index];
     if (cur_font->xft_ft) {
+        // Cut a hole in the background
+        XftTextRender16(dpy, PictOpOutReverse, whitepic, cur_font->xft_ft, mon->pic, x, y, x, y, &ch, 1);
+        // Render text over the background
         XftDrawString16 (xft_draw, &sel_fg, cur_font->xft_ft, x,y, &ch, 1);
     } else {
         /* xcb accepts string in UCS-2 BE, so swap */
@@ -890,6 +900,8 @@ monitor_new (int x, int y, int width, int height)
     ret->pixmap = xcb_generate_id(c);
     xcb_create_pixmap(c, depth, ret->pixmap, ret->window, width, bh);
 
+    ret->pic = XRenderCreatePicture(dpy, ret->pixmap, pictformat, 0, 0);
+
     return ret;
 }
 
@@ -1210,6 +1222,9 @@ xconn (void)
 	visual = get_visual();
     colormap = xcb_generate_id(c);
     xcb_create_colormap(c, XCB_COLORMAP_ALLOC_NONE, colormap, scr->root, visual);
+
+    // For XRender drawing
+    pictformat = XRenderFindVisualFormat(dpy, visual_ptr);
 }
 
 void
@@ -1307,13 +1322,10 @@ init (char *wm_name)
             xcb_change_property(c, XCB_PROP_MODE_REPLACE, monhead->window, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8 ,strlen(wm_name), wm_name);
     }
 
-    char color[] = "#ffffff";
-    uint32_t nfgc = fgc.v & 0x00ffffff;
-    snprintf(color, sizeof(color), "#%06X", nfgc);
+    const XRenderColor white = { 0xffff, 0xffff, 0xffff, 0xffff };
+    whitepic = XRenderCreateSolidFill(dpy, &white);
 
-    if (!XftColorAllocName (dpy, visual_ptr, colormap, color, &sel_fg)) {
-        fprintf(stderr, "Couldn't allocate xft font color '%s'\n", color);
-    }
+    alloc_fg_color();
     xcb_flush(c);
 }
 
@@ -1334,6 +1346,7 @@ cleanup (void)
 
     while (monhead) {
         monitor_t *next = monhead->next;
+        XRenderFreePicture(dpy, monhead->pic);
         xcb_destroy_window(c, monhead->window);
         xcb_free_pixmap(c, monhead->pixmap);
         free(monhead);
@@ -1341,6 +1354,7 @@ cleanup (void)
     }
 
     XftColorFree(dpy, visual_ptr, colormap, &sel_fg);
+    XRenderFreePicture(dpy, whitepic);
 
     if (gc[GC_DRAW])
         xcb_free_gc(c, gc[GC_DRAW]);
