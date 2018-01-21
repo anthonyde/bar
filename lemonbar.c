@@ -88,7 +88,7 @@ enum {
     GC_MAX
 };
 
-#define MAX_FONT_COUNT 5
+#define MAX_FONT_COUNT 7
 
 static Display *dpy;
 static xcb_connection_t *c;
